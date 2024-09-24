@@ -47,8 +47,9 @@ defmodule Snowflex.DBConnection do
         DBConnection.child_spec(Protocol, opts)
       end
 
-      def execute(statement, params \\ []) when is_binary(statement) and is_list(params) do
-        case prepare_execute("", statement, params) do
+      def execute(statement, params \\ [], opts \\ [])
+          when is_binary(statement) and is_list(params) and is_list(opts) do
+        case prepare_execute("", statement, params, opts) do
           {:ok, _query, result} -> {:ok, result}
           {:error, error} -> {:error, error}
         end
