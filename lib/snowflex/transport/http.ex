@@ -22,6 +22,7 @@ defmodule Snowflex.Transport.Http do
   * `:timeout` - Query timeout in milliseconds (default: 45 seconds)
   * `:token_lifetime` - JWT token lifetime in milliseconds (default: 10 minutes)
   * `:private_key_password` - Password for the private key (if encrypted)
+  * `:fetch_token` - Callback function or MFA tuple for custom token retrieval (see below)
   * `:async_poll_interval` - Interval in milliseconds to poll for async execution status (default: 1000)
   * `:max_retries` - Maximum retry attempts for rate limits (default: 3)
   * `:retry_base_delay` - Base delay for exponential backoff in milliseconds (default: 1000)
@@ -43,8 +44,40 @@ defmodule Snowflex.Transport.Http do
 
   ## Authentication
 
-  The transport uses JWT authentication with RSA key pairs. The private key must be in PEM format
+  The transport supports multiple authentication methods:
+
+  ### JWT Key Pair Authentication (default)
+  Uses RSA key pairs to generate JWT tokens. The private key must be in PEM format
   and the public key fingerprint must be registered with Snowflake.
+
+  ### Custom Token Callback (OAuth, WIF, PAT)
+  For OAuth, Workload Identity Federation (WIF), or Programmatic Access Tokens (PAT),
+  use the `:fetch_token` option to provide a callback that returns the token.
+
+  The callback must return `{:ok, {token, token_type, expires_at}}` where:
+  * `token` - The bearer token string
+  * `token_type` - One of `:jwt`, `:oauth`, or `:pat`
+  * `expires_at` - Unix timestamp in seconds when the token expires
+
+  When using `:fetch_token`, the `:private_key_path`, `:private_key_from_string`,
+  and `:public_key_fingerprint` options are not required.
+
+  ```elixir
+  # Using an anonymous function
+  config :my_app, MyApp.Repo,
+    account_name: "my-org-my-account",
+    username: "my_service_user",
+    fetch_token: fn ->
+      # Your custom logic to get a token (e.g., WIF with AWS role chaining)
+      {:ok, {token, :oauth, expires_at}}
+    end
+
+  # Using an MFA tuple
+  config :my_app, MyApp.Repo,
+    account_name: "my-org-my-account",
+    username: "my_service_user",
+    fetch_token: {MyApp.Auth, :get_snowflake_token, []}
+  ```
 
   ## Private Key Configuration
 
@@ -120,6 +153,10 @@ defmodule Snowflex.Transport.Http do
       :private_key,
       :private_key_password,
       :timeout,
+      :fetch_token,
+      :token,
+      :token_type,
+      :token_expires_at,
       :token_lifetime,
       :current_statement,
       :current_partition,
@@ -142,7 +179,11 @@ defmodule Snowflex.Transport.Http do
             private_key: String.t(),
             private_key_password: String.t() | nil,
             timeout: integer(),
+            fetch_token: function() | mfa() | nil,
+            token: String.t() | nil,
+            token_expires_at: non_neg_integer() | nil,
             token_lifetime: integer(),
+            token_type: :jwt | :wif | nil,
             current_statement: String.t() | nil,
             current_partition: integer() | nil,
             database: String.t() | nil,
@@ -314,7 +355,6 @@ defmodule Snowflex.Transport.Http do
 
   defp await_async_execution(state, 202, %{"statementHandle" => statement_handle}) do
     url = "/api/v2/statements/#{statement_handle}"
-
     req_client = build_req_client(state)
 
     case Req.get(req_client, url: url, receive_timeout: state.timeout) do
@@ -432,8 +472,17 @@ defmodule Snowflex.Transport.Http do
   end
 
   defp validate_required_opts(opts) do
+    has_fetch_token = Keyword.has_key?(opts, :fetch_token)
+
+    required_keys =
+      if has_fetch_token do
+        [:account_name, :username]
+      else
+        [:account_name, :username, :public_key_fingerprint]
+      end
+
     Enum.reduce_while(
-      [:account_name, :username, :public_key_fingerprint],
+      required_keys,
       {:ok, opts},
       fn
         key, validated_opts ->
@@ -451,23 +500,30 @@ defmodule Snowflex.Transport.Http do
   defp validate_and_read_private_key_opts(opts) do
     private_key_path = Keyword.get(opts, :private_key_path)
     private_key_from_string = Keyword.get(opts, :private_key_from_string)
+    has_fetch_token = Keyword.has_key?(opts, :fetch_token)
 
-    case {private_key_path, private_key_from_string} do
-      {path, nil} when is_binary(path) and byte_size(path) > 0 ->
+    case {private_key_path, private_key_from_string, has_fetch_token} do
+      {path, nil, _} when is_binary(path) and byte_size(path) > 0 ->
         read_private_key_from_file(opts, path)
 
-      {nil, key} when is_binary(key) and byte_size(key) > 0 ->
+      {nil, key, _} when is_binary(key) and byte_size(key) > 0 ->
         {:ok, opts, key}
 
-      {path, key} when is_binary(path) and is_binary(key) ->
+      {path, key, _} when is_binary(path) and byte_size(path) > 0 and is_binary(key) and byte_size(key) > 0 ->
         {:stop,
          %Error{
            message: "Both :private_key_path and :private_key_from_string provided. Use only one."
          }}
 
-      _any ->
+      {_, _, true} ->
+        # fetch_token provided, private key not required
+        {:ok, opts, nil}
+
+      {_, _, false} ->
         {:stop,
-         %Error{message: "Either :private_key_path or :private_key_from_string must be provided"}}
+         %Error{
+           message: "Either :private_key_path or :private_key_from_string must be provided"
+         }}
     end
   end
 
@@ -486,12 +542,14 @@ defmodule Snowflex.Transport.Http do
      %State{
        account_name: Keyword.fetch!(validated_opts, :account_name),
        username: Keyword.fetch!(validated_opts, :username),
-       public_key_fingerprint: Keyword.fetch!(validated_opts, :public_key_fingerprint),
+       public_key_fingerprint: Keyword.get(validated_opts, :public_key_fingerprint),
        private_key: private_key,
        private_key_password: Keyword.get(validated_opts, :private_key_password, ~c""),
        current_statement: nil,
        timeout: Keyword.get(validated_opts, :timeout, @default_timeout),
        token_lifetime: Keyword.get(validated_opts, :token_lifetime, @default_token_lifetime),
+       fetch_token: Keyword.get(validated_opts, :fetch_token),
+       token_expires_at: nil,
        database: Keyword.get(validated_opts, :database),
        schema: Keyword.get(validated_opts, :schema),
        warehouse: Keyword.get(validated_opts, :warehouse),
@@ -505,6 +563,7 @@ defmodule Snowflex.Transport.Http do
   end
 
   defp check_connection(state) do
+    state = maybe_refresh_token!(state)
     case fetch_statement(state, "SELECT 1", %{}, timeout: state.timeout) do
       {:ok, _status, _body} ->
         {:ok, state}
@@ -518,7 +577,8 @@ defmodule Snowflex.Transport.Http do
 
   defp generate_token(state) do
     now = System.system_time(:second)
-    expires_at = now + state.token_lifetime
+    # Backwards compatibility(ish), this was mistakenly ms when it should be seconds
+    expires_at = now + Integer.floor_div(state.token_lifetime, 1000)
 
     account_id = prepare_account_name_for_jwt(state.account_name)
     username = String.upcase(state.username)
@@ -538,7 +598,7 @@ defmodule Snowflex.Transport.Http do
     jwt = JWT.sign(jwk, jws, claims)
     {_, token} = JWS.compact(jwt)
 
-    token
+    {:ok, {token, :jwt, expires_at}}
   end
 
   defp prepare_account_name_for_jwt(raw_account) do
@@ -566,11 +626,11 @@ defmodule Snowflex.Transport.Http do
     Req.new(
       base_url: base_url,
       headers: [
-        {"Authorization", "Bearer #{generate_token(state)}"},
+        {"Authorization", "Bearer #{state.token}"},
         {"Content-Type", "application/json"},
         {"Accept", "application/json"},
         {"User-Agent", "snowflex/#{snowflex_version()}"},
-        {"X-Snowflake-Authorization-Token-Type", "KEYPAIR_JWT"}
+        {"X-Snowflake-Authorization-Token-Type", token_type_header(state.token_type)}
       ],
       retry: :safe_transient,
       retry_delay: fn attempt ->
@@ -580,6 +640,11 @@ defmodule Snowflex.Transport.Http do
       connect_options: state.connect_options
     )
   end
+
+  defp token_type_header(:jwt), do: "KEYPAIR_JWT"
+  defp token_type_header(:oauth), do: "OAUTH"
+  defp token_type_header(:pat), do: "PROGRAMMATIC_ACCESS_TOKEN"
+  defp token_type_header(_), do: "KEYPAIR_JWT"
 
   defp snowflex_version do
     Application.spec(:snowflex)[:vsn]
@@ -741,6 +806,28 @@ defmodule Snowflex.Transport.Http do
              partition_index: partition_index
            }
          }}
+    end
+  end
+
+  defp maybe_refresh_token!(state) do
+    now = :os.system_time(:second)
+
+    case state do
+      %{token: token, token_type: token_type, token_expires_at: expires_at}
+      when is_binary(token) and not is_nil(token_type) and expires_at > now ->
+        state
+
+      %{fetch_token: cb} when is_function(cb, 0) ->
+        {:ok, {token, token_type, expires}} = cb.()
+        %{state | token: token, token_type: token_type, token_expires_at: expires}
+
+      %{fetch_token: {mod, fun, args}} ->
+        {:ok, {token, token_type, expires}} = apply(mod, fun, args)
+        %{state | token: token, token_type: token_type, token_expires_at: expires}
+
+      _ ->
+        {:ok, {token, token_type, expires}} = generate_token(state)
+        %{state | token: token, token_type: token_type, token_expires_at: expires}
     end
   end
 

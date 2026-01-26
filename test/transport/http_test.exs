@@ -268,4 +268,72 @@ defmodule Snowflex.Transport.HttpTest do
       end
     end
   end
+
+  describe "fetch_token callback" do
+    @base_opts [
+      account_name: "test-account",
+      username: "test_user"
+    ]
+
+    test "accepts fetch_token function without private key" do
+      expires_at = System.system_time(:second) + 3600
+      fetch_token = fn -> {:ok, {"test_token", :oauth, expires_at}} end
+      opts = @base_opts ++ [fetch_token: fetch_token]
+
+      Process.flag(:trap_exit, true)
+
+      case Http.start_link(opts) do
+        {:error, %Error{message: message}} ->
+          refute String.contains?(message, "Missing required option")
+          refute String.contains?(message, "private_key")
+
+        {:error, _other} ->
+          :ok
+
+        {:ok, pid} ->
+          receive do
+            {:EXIT, ^pid, %Error{message: message}} ->
+              refute String.contains?(message, "Missing required option")
+              refute String.contains?(message, "private_key")
+
+            {:EXIT, ^pid, _reason} ->
+              :ok
+          after
+            5000 -> flunk("Expected process to exit")
+          end
+      end
+    end
+
+    test "accepts fetch_token MFA tuple without private key" do
+      opts = @base_opts ++ [fetch_token: {__MODULE__, :test_fetch_token, []}]
+
+      Process.flag(:trap_exit, true)
+
+      case Http.start_link(opts) do
+        {:error, %Error{message: message}} ->
+          refute String.contains?(message, "Missing required option")
+          refute String.contains?(message, "private_key")
+
+        {:error, _other} ->
+          :ok
+
+        {:ok, pid} ->
+          receive do
+            {:EXIT, ^pid, %Error{message: message}} ->
+              refute String.contains?(message, "Missing required option")
+              refute String.contains?(message, "private_key")
+
+            {:EXIT, ^pid, _reason} ->
+              :ok
+          after
+            5000 -> flunk("Expected process to exit")
+          end
+      end
+    end
+
+    def test_fetch_token do
+      expires_at = System.system_time(:second) + 3600
+      {:ok, {"test_token", :oauth, expires_at}}
+    end
+  end
 end
