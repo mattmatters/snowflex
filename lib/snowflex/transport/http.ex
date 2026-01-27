@@ -509,7 +509,8 @@ defmodule Snowflex.Transport.Http do
       {nil, key, _} when is_binary(key) and byte_size(key) > 0 ->
         {:ok, opts, key}
 
-      {path, key, _} when is_binary(path) and byte_size(path) > 0 and is_binary(key) and byte_size(key) > 0 ->
+      {path, key, _}
+      when is_binary(path) and byte_size(path) > 0 and is_binary(key) and byte_size(key) > 0 ->
         {:stop,
          %Error{
            message: "Both :private_key_path and :private_key_from_string provided. Use only one."
@@ -564,6 +565,7 @@ defmodule Snowflex.Transport.Http do
 
   defp check_connection(state) do
     state = maybe_refresh_token!(state)
+
     case fetch_statement(state, "SELECT 1", %{}, timeout: state.timeout) do
       {:ok, _status, _body} ->
         {:ok, state}
@@ -623,15 +625,17 @@ defmodule Snowflex.Transport.Http do
   defp build_req_client(state) do
     base_url = "https://#{state.account_name}.snowflakecomputing.com"
 
+    headers =
+      auth_headers(state.token, state.token_type) ++
+        [
+          {"Content-Type", "application/json"},
+          {"Accept", "application/json"},
+          {"User-Agent", "snowflex/#{snowflex_version()}"}
+        ]
+
     Req.new(
       base_url: base_url,
-      headers: [
-        {"Authorization", "Bearer #{state.token}"},
-        {"Content-Type", "application/json"},
-        {"Accept", "application/json"},
-        {"User-Agent", "snowflex/#{snowflex_version()}"},
-        {"X-Snowflake-Authorization-Token-Type", token_type_header(state.token_type)}
-      ],
+      headers: headers,
       retry: :safe_transient,
       retry_delay: fn attempt ->
         calculate_backoff_delay(attempt, state.retry_base_delay, state.retry_max_delay)
@@ -639,6 +643,19 @@ defmodule Snowflex.Transport.Http do
       max_retries: state.max_retries,
       connect_options: state.connect_options
     )
+  end
+
+  defp auth_headers(token, :session) do
+    [
+      {"Authorization", "Snowflake Token=\"#{token}\""}
+    ]
+  end
+
+  defp auth_headers(token, token_type) do
+    [
+      {"Authorization", "Bearer #{token}"},
+      {"X-Snowflake-Authorization-Token-Type", token_type_header(token_type)}
+    ]
   end
 
   defp token_type_header(:jwt), do: "KEYPAIR_JWT"
