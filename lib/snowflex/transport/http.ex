@@ -50,7 +50,7 @@ defmodule Snowflex.Transport.Http do
   Uses RSA key pairs to generate JWT tokens. The private key must be in PEM format
   and the public key fingerprint must be registered with Snowflake.
 
-  ### Custom Token Callback (OAuth, WIF, PAT)
+  ### Custom Token Callback (session, OAuth, WIF, PAT)
   For OAuth, Workload Identity Federation (WIF), or Programmatic Access Tokens (PAT),
   use the `:fetch_token` option to provide a callback that returns the token.
 
