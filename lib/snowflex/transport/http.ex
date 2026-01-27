@@ -661,6 +661,7 @@ defmodule Snowflex.Transport.Http do
   defp token_type_header(:jwt), do: "KEYPAIR_JWT"
   defp token_type_header(:oauth), do: "OAUTH"
   defp token_type_header(:pat), do: "PROGRAMMATIC_ACCESS_TOKEN"
+  defp token_type_header(:wif), do: "WORKLOAD_IDENTITY"
   defp token_type_header(_), do: "KEYPAIR_JWT"
 
   defp snowflex_version do
