@@ -795,7 +795,8 @@ defmodule Snowflex.Transport.Http do
       parameters: request_params(opts),
       describedJobId: nil,
       isInternal: false,
-      asyncExec: false
+      asyncExec: false,
+      warehouse: Keyword.get(opts, :warehouse, state.warehouse)
     }
 
     request_id = generate_uuid()
