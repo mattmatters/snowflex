@@ -291,19 +291,33 @@ defmodule Snowflex.Transport.Http do
     end
   end
 
+  # v1 API: declare stores query ID and chunk info for streaming
   def handle_call({:declare, statement, params, opts}, _from, state) do
     case fetch_statement(state, statement, params, opts) do
-      {:ok, _status,
-       %{
-         "statementHandle" => statement_handle,
-         "resultSetMetaData" => %{"partitionInfo" => partitions} = metadata
-       }} ->
-        {:reply, {:ok, length(partitions) - 1},
+      {:ok, _status, %{"queryId" => query_id, "rowtype" => rowtype, "chunks" => chunks} = data}
+      when is_list(chunks) ->
+        chunk_count = length(chunks)
+
+        {:reply, {:ok, chunk_count},
          %{
            state
-           | current_statement: statement_handle,
+           | current_statement: query_id,
              current_partition: 0,
-             result_metadata: metadata
+             result_metadata: %{
+               "rowType" => rowtype,
+               "chunks" => chunks,
+               "chunkHeaders" => data["chunkHeaders"]
+             }
+         }}
+
+      {:ok, _status, %{"queryId" => query_id, "rowtype" => rowtype}} ->
+        # No chunks, single result set
+        {:reply, {:ok, 0},
+         %{
+           state
+           | current_statement: query_id,
+             current_partition: 0,
+             result_metadata: %{"rowType" => rowtype}
          }}
 
       {:error, error} ->
@@ -311,22 +325,30 @@ defmodule Snowflex.Transport.Http do
     end
   end
 
+  # v1 API: fetch chunks from S3
   def handle_call(
         {:fetch, max_partition, opts},
         _from,
         %{
           current_partition: current_partition,
-          current_statement: current_statement,
-          result_metadata: metadata
+          result_metadata: %{"chunks" => chunks, "chunkHeaders" => headers} = metadata
         } = state
       )
-      when current_partition <= max_partition do
-    case fetch_partition(state, current_statement, current_partition, opts) do
-      {:ok, result} ->
-        result = format_response_body(result)
+      when current_partition <= max_partition and is_list(chunks) do
+    chunk = Enum.at(chunks, current_partition)
+    key = headers["x-amz-server-side-encryption-customer-key"]
+    md5 = headers["x-amz-server-side-encryption-customer-key-md5"]
 
-        result =
-          Map.put(result, :columns, Enum.map(metadata["rowType"], & &1["name"]))
+    case fetch_s3_chunk(chunk, key, md5) do
+      {:ok, rows} ->
+        rowtype = metadata["rowType"]
+        mapped_rows = map_rows(rows, rowtype)
+
+        result = %Result{
+          columns: Enum.map(rowtype, & &1["name"]),
+          rows: mapped_rows,
+          num_rows: length(mapped_rows)
+        }
 
         {:reply, {:ok, result}, %{state | current_partition: current_partition + 1}}
 
@@ -335,130 +357,155 @@ defmodule Snowflex.Transport.Http do
     end
   end
 
-  # No more partitions to call, but we do have a current statement
+  # No chunks or no more partitions
   def handle_call(
-        {:fetch, _max_partition, _num_rows},
+        {:fetch, _max_partition, _opts},
         _from,
-        %{
-          current_statement: current_statement
-        } = state
+        %{current_statement: current_statement} = state
       )
       when is_binary(current_statement) and byte_size(current_statement) > 0 do
     {:reply, {:halt, %Result{}}, state}
   end
 
-  def handle_call({:fetch, _max_partition, _num_rows}, _from, state) do
+  def handle_call({:fetch, _max_partition, _opts}, _from, state) do
     {:reply, {:error, %Error{message: "No active statement"}}, state}
   end
 
   ## Query helpers
 
-  defp await_async_execution(state, 202, %{"statementHandle" => statement_handle}) do
-    url = "/api/v2/statements/#{statement_handle}"
-    req_client = build_req_client(state)
-
-    case Req.get(req_client, url: url, receive_timeout: state.timeout) do
-      {:ok, %{status: 202, body: body}} ->
-        Process.sleep(state.async_poll_interval)
-        await_async_execution(state, 202, body)
-
-      {:ok, %{status: status, body: body}} when status in 200..299 ->
-        {:ok, body}
-
-      {:ok, %{body: %{"code" => code, "message" => message}}} ->
-        {:error, %Error{message: String.replace(message, ~r/\n/, " "), code: code}}
-    end
+  # v1 API async query response (code 333334 means async execution started)
+  defp await_async_execution(state, 200, %{"queryId" => query_id} = body)
+       when not is_map_key(body, "rowtype") do
+    poll_query_status(state, query_id)
   end
 
   defp await_async_execution(_state, _status, body), do: {:ok, body}
 
-  defp gather_results(state, %{"statementHandles" => statement_handles}, opts) do
-    max_concurrency = System.schedulers_online()
-    extended_timeout = opts[:timeout] + :timer.seconds(30)
+  defp poll_query_status(state, query_id) do
+    url = "/monitoring/queries/#{query_id}"
+    req_client = build_req_client(state)
 
-    Task.Supervisor.async_stream_nolink(
-      Snowflex.TaskSupervisor,
-      statement_handles,
-      fn handle ->
-        case await_async_execution(state, 202, %{"statementHandle" => handle}) do
-          {:ok, body} -> gather_results(state, body, opts)
-          {:error, error} -> {:error, error}
-        end
-      end,
-      max_concurrency: max_concurrency,
-      ordered: true,
-      timeout: extended_timeout,
-      on_timeout: :kill_task
-    )
-    |> Enum.reduce_while({:ok, []}, fn
-      {:ok, {:ok, result_body}}, {:ok, acc} ->
-        {:cont, {:ok, acc ++ [{:ok, result_body}]}}
+    case Req.get(req_client, url: url, receive_timeout: state.timeout) do
+      {:ok, %{status: 200, body: %{"data" => %{"queries" => [%{"status" => status}]}}}}
+      when status in ["RUNNING", "QUEUED", "RESUMING_WAREHOUSE"] ->
+        Process.sleep(state.async_poll_interval)
+        poll_query_status(state, query_id)
 
-      {:ok, {:error, error}}, _acc ->
-        {:halt, {:error, error}}
+      {:ok, %{status: 200, body: %{"data" => %{"queries" => [%{"status" => "SUCCESS"}]}}}} ->
+        fetch_query_result(state, query_id)
 
-      {:exit, reason}, _acc ->
-        {:halt, {:error, %Error{message: "Task failed: #{inspect(reason)}"}}}
-    end)
+      {:ok, %{status: 200, body: %{"data" => %{"queries" => [%{"status" => status, "errorMessage" => error}]}}}} ->
+        {:error, %Error{message: error, code: status}}
+
+      {:ok, %{status: 200, body: %{"data" => %{"queries" => []}}}} ->
+        # Query not found yet, keep polling
+        Process.sleep(state.async_poll_interval)
+        poll_query_status(state, query_id)
+
+      {:ok, %{body: %{"message" => message}}} ->
+        {:error, %Error{message: message}}
+
+      {:error, err} ->
+        {:error, %Error{message: inspect(err)}}
+    end
   end
 
+  defp fetch_query_result(state, query_id) do
+    url = "/queries/#{query_id}/result"
+    req_client = build_req_client(state)
+
+    case Req.get(req_client, url: url, receive_timeout: state.timeout) do
+      {:ok, %{status: 200, body: %{"success" => true, "data" => data}}} ->
+        {:ok, data}
+
+      {:ok, %{body: %{"message" => message}}} ->
+        {:error, %Error{message: message}}
+
+      {:error, err} ->
+        {:error, %Error{message: inspect(err)}}
+    end
+  end
+
+  # v1 API: Handle responses with S3 chunks (large result sets)
   defp gather_results(
-         state,
+         _state,
          %{
-           "resultSetMetaData" => %{"partitionInfo" => partition_info},
-           "statementHandle" => statement_handle
+           "chunks" => chunks,
+           "chunkHeaders" => %{
+             "x-amz-server-side-encryption-customer-key" => key,
+             "x-amz-server-side-encryption-customer-key-md5" => md5
+           },
+           "rowset" => initial_rowset,
+           "rowtype" => _rowtype
          } = body,
          opts
        )
-       when is_list(partition_info) and length(partition_info) > 1 do
-    initial_data = Map.get(body, "data", [])
-
-    partition_count = length(partition_info)
-    rest_partitions = Enum.to_list(1..(partition_count - 1)//1)
-
+       when is_list(chunks) and length(chunks) > 0 do
     max_concurrency = System.schedulers_online()
-
-    # Extended timeout to account for Req retries
     extended_timeout = opts[:timeout] + :timer.seconds(30)
 
-    # Fetch partitions in parallel
-    Task.Supervisor.async_stream_nolink(
-      Snowflex.TaskSupervisor,
-      rest_partitions,
-      fn partition_index ->
-        fetch_partition(state, statement_handle, partition_index, opts)
-      end,
-      max_concurrency: max_concurrency,
-      ordered: true,
-      timeout: extended_timeout,
-      on_timeout: :kill_task
-    )
-    |> Enum.reduce_while({:ok, initial_data}, fn
-      {:ok, {:ok, partition_body}}, {:ok, acc_data} ->
-        # Extract data from this partition and add to accumulated data
-        partition_data = Map.get(partition_body, "data", [])
-        {:cont, {:ok, acc_data ++ partition_data}}
+    # Fetch chunks from S3 in parallel
+    chunk_rows =
+      Task.Supervisor.async_stream_nolink(
+        Snowflex.TaskSupervisor,
+        chunks,
+        fn chunk -> fetch_s3_chunk(chunk, key, md5) end,
+        max_concurrency: max_concurrency,
+        ordered: true,
+        timeout: extended_timeout,
+        on_timeout: :kill_task
+      )
+      |> Enum.reduce_while({:ok, []}, fn
+        {:ok, {:ok, rows}}, {:ok, acc} ->
+          {:cont, {:ok, acc ++ rows}}
 
-      {:ok, {:error, error}}, _acc ->
-        {:halt, {:error, error}}
+        {:ok, {:error, error}}, _acc ->
+          {:halt, {:error, error}}
 
-      {:exit, reason}, _acc ->
-        {:halt, {:error, %Error{message: "Task failed: #{inspect(reason)}"}}}
-    end)
-    |> then(fn
-      {:ok, merged_data} ->
-        # Update the original body with the merged data
-        merged_body = Map.put(body, "data", merged_data)
-        {:ok, merged_body}
+        {:exit, reason}, _acc ->
+          {:halt, {:error, %Error{message: "Chunk download failed: #{inspect(reason)}"}}}
+      end)
+
+    case chunk_rows do
+      {:ok, all_chunk_rows} ->
+        merged_rowset = initial_rowset ++ all_chunk_rows
+        {:ok, Map.put(body, "rowset", merged_rowset)}
 
       {:error, error} ->
         {:error, error}
-    end)
+    end
   end
 
-  # There was only one partition, so we can return the body as is
+  # No chunks, return as-is
   defp gather_results(_state, body, _opts) do
     {:ok, body}
+  end
+
+  defp fetch_s3_chunk(%{"url" => url}, encryption_key, encryption_key_md5) do
+    headers = [
+      {"Accept", "application/snowflake"},
+      {"x-amz-server-side-encryption-customer-algorithm", "AES256"},
+      {"x-amz-server-side-encryption-customer-key", encryption_key},
+      {"x-amz-server-side-encryption-customer-key-md5", encryption_key_md5}
+    ]
+
+    case Req.get(url: url, headers: headers, receive_timeout: 180_000) do
+      {:ok, %{status: 200, body: body}} when is_list(body) ->
+        {:ok, body}
+
+      {:ok, %{status: 200, body: body}} when is_binary(body) ->
+        # Body might be JSON string
+        case JSON.decode(body) do
+          {:ok, rows} when is_list(rows) -> {:ok, rows}
+          _ -> {:error, %Error{message: "Failed to decode chunk"}}
+        end
+
+      {:ok, %{status: status, body: body}} ->
+        {:error, %Error{message: "Chunk download failed: HTTP #{status}: #{inspect(body)}"}}
+
+      {:error, err} ->
+        {:error, %Error{message: "Chunk download failed: #{inspect(err)}"}}
+    end
   end
 
   # Init/Config Helpers
@@ -625,17 +672,14 @@ defmodule Snowflex.Transport.Http do
   defp build_req_client(state) do
     base_url = "https://#{state.account_name}.snowflakecomputing.com"
 
-    headers =
-      auth_headers(state.token, state.token_type) ++
-        [
-          {"Content-Type", "application/json"},
-          {"Accept", "application/json"},
-          {"User-Agent", "snowflex/#{snowflex_version()}"}
-        ]
-
     Req.new(
       base_url: base_url,
-      headers: headers,
+      headers: [
+        {"Authorization", "Snowflake Token=\"#{state.token}\""},
+        {"Content-Type", "application/json"},
+        {"Accept", "application/snowflake"},
+        {"User-Agent", "snowflex/#{snowflex_version()}"}
+      ],
       retry: :safe_transient,
       retry_delay: fn attempt ->
         calculate_backoff_delay(attempt, state.retry_base_delay, state.retry_max_delay)
@@ -644,25 +688,6 @@ defmodule Snowflex.Transport.Http do
       connect_options: state.connect_options
     )
   end
-
-  defp auth_headers(token, :session) do
-    [
-      {"Authorization", "Snowflake Token=\"#{token}\""}
-    ]
-  end
-
-  defp auth_headers(token, token_type) do
-    [
-      {"Authorization", "Bearer #{token}"},
-      # {"X-Snowflake-Authorization-Token-Type", token_type_header(token_type)}
-    ]
-  end
-
-  # defp token_type_header(:jwt), do: "KEYPAIR_JWT"
-  # defp token_type_header(:oauth), do: "OAUTH"
-  # defp token_type_header(:pat), do: "PROGRAMMATIC_ACCESS_TOKEN"
-  # defp token_type_header(:wif), do: "WORKLOAD_IDENTITY"
-  # defp token_type_header(_), do: "KEYPAIR_JWT"
 
   defp snowflex_version do
     Application.spec(:snowflex)[:vsn]
@@ -681,88 +706,122 @@ defmodule Snowflex.Transport.Http do
     Enum.map(body, fn {:ok, statement_body} -> format_response_body(statement_body) end)
   end
 
-  defp format_response_body(body) do
-    case body do
-      %{
-        "resultSetMetaData" => %{
-          "rowType" => [%{"name" => "number of rows inserted"}]
-        },
-        "stats" => %{
-          "numRowsInserted" => num_rows
-        }
-      } ->
-        result(body, %{columns: [], rows: nil, num_rows: num_rows})
+  # v1 API response format
+  defp format_response_body(%{"rowtype" => rowtype, "rowset" => rowset} = body) do
+    columns = Enum.map(rowtype, & &1["name"])
+    rows = map_rows(rowset, rowtype)
 
-      %{
-        "resultSetMetaData" => %{
-          "rowType" => [%{"name" => "number of rows deleted"}]
-        },
-        "stats" => %{
-          "numRowsDeleted" => num_rows
-        }
-      } ->
-        result(body, %{columns: [], rows: nil, num_rows: num_rows})
-
-      %{"data" => data, "resultSetMetaData" => metadata} ->
-        columns = Enum.map(metadata["rowType"], & &1["name"])
-        rows = data
-
-        result(body, %{
-          columns: columns,
-          rows: rows,
-          num_rows: length(rows),
-          metadata: metadata
-        })
-
-      # Calls to additional partitions will not bring back the result set metadata
-      %{"data" => data} ->
-        result(body, %{rows: data, num_rows: length(data)})
-
-      _any ->
-        result(body, %{messages: [body["message"] || "Query executed successfully"]})
-    end
+    result_v1(body, %{
+      columns: columns,
+      rows: rows,
+      num_rows: body["total"] || length(rows),
+      metadata: %{"rowType" => rowtype}
+    })
   end
 
-  defp result(body, attrs) do
+  # v1 API response with no rows (DDL, DML)
+  defp format_response_body(%{"rowtype" => rowtype, "total" => total} = body) do
+    columns = Enum.map(rowtype, & &1["name"])
+
+    result_v1(body, %{
+      columns: columns,
+      rows: [],
+      num_rows: total
+    })
+  end
+
+  # Fallback for other responses
+  defp format_response_body(body) do
+    result_v1(body, %{messages: [body["message"] || "Query executed successfully"]})
+  end
+
+  defp result_v1(body, attrs) do
     %{
-      query_id: body["statementHandle"],
-      request_id: body["requestId"],
+      query_id: body["queryId"],
+      request_id: nil,
       sql_state: body["sqlState"]
     }
     |> Map.merge(attrs)
     |> then(&struct!(Result, &1))
   end
 
+  # Map row values based on column types
+  defp map_rows(rowset, rowtype) do
+    Enum.map(rowset, fn row ->
+      row
+      |> Enum.zip(rowtype)
+      |> Enum.map(fn {value, col} -> map_value(value, col) end)
+    end)
+  end
+
+  defp map_value(nil, _col), do: nil
+  defp map_value(value, %{"type" => "fixed", "scale" => 0}), do: parse_integer(value)
+  defp map_value(value, %{"type" => "fixed"}), do: parse_decimal(value)
+  defp map_value(value, %{"type" => "real"}), do: parse_float(value)
+  defp map_value(value, %{"type" => "boolean"}), do: value == "true" or value == true
+  defp map_value(value, %{"type" => "date"}), do: value
+  defp map_value(value, %{"type" => "time"}), do: value
+  defp map_value(value, %{"type" => "timestamp_ntz"}), do: value
+  defp map_value(value, %{"type" => "timestamp_tz"}), do: value
+  defp map_value(value, %{"type" => "timestamp_ltz"}), do: value
+  defp map_value(value, _col), do: value
+
+  defp parse_integer(value) when is_integer(value), do: value
+  defp parse_integer(value) when is_binary(value), do: String.to_integer(value)
+  defp parse_integer(value), do: value
+
+  defp parse_float(value) when is_float(value), do: value
+  defp parse_float(value) when is_binary(value), do: String.to_float(value)
+  defp parse_float(value), do: value
+
+  defp parse_decimal(value) when is_binary(value) do
+    case Decimal.parse(value) do
+      {decimal, ""} -> decimal
+      _ -> value
+    end
+  end
+
+  defp parse_decimal(value), do: value
+
   # HTTP Calls
 
   defp fetch_statement(state, statement, params, opts) do
     req_body = %{
-      statement: statement,
-      timeout: opts[:timeout],
-      database: state.database,
-      schema: state.schema,
-      warehouse: state.warehouse,
-      role: state.role,
-      bindings: params_to_bindings(params),
-      parameters: request_params(opts)
+      sqlText: statement,
+      sequenceId: 0,
+      bindings: params_to_bindings_v1(params),
+      bindStage: nil,
+      describeOnly: false,
+      parameters: request_params(opts),
+      describedJobId: nil,
+      isInternal: false,
+      asyncExec: false
     }
 
-    url = "/api/v2/statements"
+    request_id = generate_uuid()
+    url = "/queries/v1/query-request?requestId=#{request_id}"
 
     req_client = build_req_client(state)
 
     case Req.post(req_client, url: url, json: req_body, receive_timeout: opts[:timeout]) do
-      {:ok, %{status: status, body: body}} when status in 200..299 ->
-        {:ok, status, body}
+      {:ok, %{status: 200, body: %{"success" => true, "data" => data}}} ->
+        {:ok, 200, data}
+
+      {:ok, %{status: 200, body: %{"success" => false, "code" => code, "message" => message}}} ->
+        {:error,
+         %Error{
+           message: String.replace(message, ~r/\n/, " "),
+           code: code,
+           metadata: %{statement: statement, request: req_body, opts: opts}
+         }}
 
       {:ok, %{body: %{"code" => code, "message" => message}} = response} ->
         {:error,
          %Error{
            message: String.replace(message, ~r/\n/, " "),
            code: code,
-           sql_state: Map.get(response.body, "sqlState"),
            metadata: %{
-             query_id: Map.get(response.body, "statementHandle"),
+             query_id: get_in(response.body, ["data", "queryId"]),
              statement: statement,
              request: req_body,
              response: response.body,
@@ -776,7 +835,7 @@ defmodule Snowflex.Transport.Http do
            code: status,
            message: inspect(body),
            metadata: %{
-             query_id: if(is_map(body), do: Map.get(body, "statementHandle"), else: nil),
+             query_id: if(is_map(body), do: get_in(body, ["data", "queryId"]), else: nil),
              statement: statement,
              request: req_body,
              response: body,
@@ -794,38 +853,42 @@ defmodule Snowflex.Transport.Http do
     end
   end
 
-  defp fetch_partition(state, statement_handle, partition_index, opts) do
-    url = "/api/v2/statements/#{statement_handle}"
-    params = %{partition: partition_index}
-    req_client = build_req_client(state)
+  defp generate_uuid do
+    <<a::32, b::16, c::16, d::16, e::48>> = :crypto.strong_rand_bytes(16)
 
-    case Req.get(req_client, url: url, params: params, receive_timeout: opts[:timeout]) do
-      {:ok, %{status: status, body: partition_body}} when status in 200..299 ->
-        {:ok, partition_body}
-
-      {:ok, %{status: status, body: error_body}} ->
-        {:error,
-         %Error{
-           message: "HTTP #{status}: #{inspect(error_body)}",
-           metadata: %{
-             query_id: statement_handle,
-             partition_index: partition_index
-           }
-         }}
-
-      {:error, exception} ->
-        Logger.warning("Failed to fetch partition #{partition_index}: #{inspect(exception)}")
-
-        {:error,
-         %Error{
-           message: "Failed to fetch partition: #{inspect(exception)}",
-           metadata: %{
-             query_id: statement_handle,
-             partition_index: partition_index
-           }
-         }}
-    end
+    <<a::32, b::16, 4::4, c::12, 2::2, d::14, e::48>>
+    |> Base.encode16(case: :lower)
+    |> String.replace(~r/(.{8})(.{4})(.{4})(.{4})(.{12})/, "\\1-\\2-\\3-\\4-\\5")
   end
+
+  defp params_to_bindings_v1(params) when map_size(params) == 0, do: nil
+  defp params_to_bindings_v1(params) when params == %{}, do: nil
+
+  defp params_to_bindings_v1(params) do
+    params
+    |> Enum.with_index(1)
+    |> Map.new(fn {value, index} ->
+      {"#{index}", %{type: infer_binding_type(value), value: format_binding_value(value)}}
+    end)
+  end
+
+  defp infer_binding_type(value) when is_binary(value), do: "TEXT"
+  defp infer_binding_type(value) when is_integer(value), do: "FIXED"
+  defp infer_binding_type(value) when is_float(value), do: "REAL"
+  defp infer_binding_type(value) when is_boolean(value), do: "BOOLEAN"
+  defp infer_binding_type(nil), do: "TEXT"
+  defp infer_binding_type(%Date{}), do: "DATE"
+  defp infer_binding_type(%DateTime{}), do: "TIMESTAMP_TZ"
+  defp infer_binding_type(%NaiveDateTime{}), do: "TIMESTAMP_NTZ"
+  defp infer_binding_type(%Time{}), do: "TIME"
+  defp infer_binding_type(_), do: "TEXT"
+
+  defp format_binding_value(%Date{} = d), do: Date.to_iso8601(d)
+  defp format_binding_value(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+  defp format_binding_value(%NaiveDateTime{} = ndt), do: NaiveDateTime.to_iso8601(ndt)
+  defp format_binding_value(%Time{} = t), do: Time.to_iso8601(t)
+  defp format_binding_value(value), do: to_string(value)
+
 
   defp maybe_refresh_token!(state) do
     now = :os.system_time(:second)
@@ -847,14 +910,6 @@ defmodule Snowflex.Transport.Http do
         {:ok, {token, token_type, expires}} = generate_token(state)
         %{state | token: token, token_type: token_type, token_expires_at: expires}
     end
-  end
-
-  defp params_to_bindings(params) do
-    params
-    |> Enum.with_index(1)
-    |> Map.new(fn {value, index} ->
-      {"#{index}", value}
-    end)
   end
 
   @default_request_params %{
