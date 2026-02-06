@@ -327,7 +327,7 @@ defmodule Snowflex.Transport.Http do
 
   # v1 API: fetch chunks from S3
   def handle_call(
-        {:fetch, max_partition, opts},
+        {:fetch, max_partition, _opts},
         _from,
         %{
           current_partition: current_partition,
@@ -394,7 +394,11 @@ defmodule Snowflex.Transport.Http do
       {:ok, %{status: 200, body: %{"data" => %{"queries" => [%{"status" => "SUCCESS"}]}}}} ->
         fetch_query_result(state, query_id)
 
-      {:ok, %{status: 200, body: %{"data" => %{"queries" => [%{"status" => status, "errorMessage" => error}]}}}} ->
+      {:ok,
+       %{
+         status: 200,
+         body: %{"data" => %{"queries" => [%{"status" => status, "errorMessage" => error}]}}
+       }} ->
         {:error, %Error{message: error, code: status}}
 
       {:ok, %{status: 200, body: %{"data" => %{"queries" => []}}}} ->
@@ -761,6 +765,7 @@ defmodule Snowflex.Transport.Http do
   defp map_value(value, %{"type" => "boolean"}), do: value == "true" or value == true
   defp map_value(value, %{"type" => "date"}), do: value
   defp map_value(value, %{"type" => "time"}), do: value
+  # TODO I believe I need to handle these here instead of the other type spot
   defp map_value(value, %{"type" => "timestamp_ntz"}), do: value
   defp map_value(value, %{"type" => "timestamp_tz"}), do: value
   defp map_value(value, %{"type" => "timestamp_ltz"}), do: value
@@ -771,7 +776,12 @@ defmodule Snowflex.Transport.Http do
   defp parse_integer(value), do: value
 
   defp parse_float(value) when is_float(value), do: value
-  defp parse_float(value) when is_binary(value), do: String.to_float(value)
+
+  defp parse_float(value) when is_binary(value) do
+    {val, _} = Float.parse(value)
+    val
+  end
+
   defp parse_float(value), do: value
 
   defp parse_decimal(value) when is_binary(value) do
@@ -795,11 +805,11 @@ defmodule Snowflex.Transport.Http do
       parameters: request_params(opts),
       describedJobId: nil,
       isInternal: false,
-      asyncExec: false,
-      warehouse: Keyword.get(opts, :warehouse, state.warehouse)
+      asyncExec: false
     }
 
     request_id = generate_uuid()
+    _warehouse = Keyword.get(opts, :warehouse, state.warehouse)
     url = "/queries/v1/query-request?requestId=#{request_id}"
 
     req_client = build_req_client(state)
@@ -808,49 +818,17 @@ defmodule Snowflex.Transport.Http do
       {:ok, %{status: 200, body: %{"success" => true, "data" => data}}} ->
         {:ok, 200, data}
 
-      {:ok, %{status: 200, body: %{"success" => false, "code" => code, "message" => message}}} ->
-        {:error,
-         %Error{
-           message: String.replace(message, ~r/\n/, " "),
-           code: code,
-           metadata: %{statement: statement, request: req_body, opts: opts}
-         }}
+      {:ok, %{body: %{"code" => code, "message" => message, "data" => data}}} ->
+        {:error, %Error{message: message, code: code, metadata: %{query_id: data["queryId"]}}}
 
-      {:ok, %{body: %{"code" => code, "message" => message}} = response} ->
-        {:error,
-         %Error{
-           message: String.replace(message, ~r/\n/, " "),
-           code: code,
-           metadata: %{
-             query_id: get_in(response.body, ["data", "queryId"]),
-             statement: statement,
-             request: req_body,
-             response: response.body,
-             opts: opts
-           }
-         }}
+      {:ok, %{body: %{"code" => code, "message" => message}}} ->
+        {:error, %Error{message: message, code: code}}
 
       {:ok, %{status: status, body: body}} ->
-        {:error,
-         %Error{
-           code: status,
-           message: inspect(body),
-           metadata: %{
-             query_id: if(is_map(body), do: get_in(body, ["data", "queryId"]), else: nil),
-             statement: statement,
-             request: req_body,
-             response: body,
-             opts: opts
-           }
-         }}
+        {:error, %Error{message: "HTTP #{status}: #{inspect(body)}", code: to_string(status)}}
 
       {:error, exception} ->
-        {:error,
-         %Error{
-           message: inspect(exception),
-           code: "HTTP_ERROR",
-           metadata: %{statement: statement, request: req_body, opts: opts}
-         }}
+        {:error, %Error{message: inspect(exception), code: "HTTP_ERROR"}}
     end
   end
 
@@ -869,27 +847,9 @@ defmodule Snowflex.Transport.Http do
     params
     |> Enum.with_index(1)
     |> Map.new(fn {value, index} ->
-      {"#{index}", %{type: infer_binding_type(value), value: format_binding_value(value)}}
+      {"#{index}", value}
     end)
   end
-
-  defp infer_binding_type(value) when is_binary(value), do: "TEXT"
-  defp infer_binding_type(value) when is_integer(value), do: "FIXED"
-  defp infer_binding_type(value) when is_float(value), do: "REAL"
-  defp infer_binding_type(value) when is_boolean(value), do: "BOOLEAN"
-  defp infer_binding_type(nil), do: "TEXT"
-  defp infer_binding_type(%Date{}), do: "DATE"
-  defp infer_binding_type(%DateTime{}), do: "TIMESTAMP_TZ"
-  defp infer_binding_type(%NaiveDateTime{}), do: "TIMESTAMP_NTZ"
-  defp infer_binding_type(%Time{}), do: "TIME"
-  defp infer_binding_type(_), do: "TEXT"
-
-  defp format_binding_value(%Date{} = d), do: Date.to_iso8601(d)
-  defp format_binding_value(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
-  defp format_binding_value(%NaiveDateTime{} = ndt), do: NaiveDateTime.to_iso8601(ndt)
-  defp format_binding_value(%Time{} = t), do: Time.to_iso8601(t)
-  defp format_binding_value(value), do: to_string(value)
-
 
   defp maybe_refresh_token!(state) do
     now = :os.system_time(:second)
