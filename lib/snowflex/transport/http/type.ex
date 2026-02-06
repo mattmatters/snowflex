@@ -137,6 +137,7 @@ defmodule Snowflex.Transport.Http.Type do
       value
       |> Decimal.new()
       |> Decimal.mult(1000)
+      |> Decimal.round(0, :floor)
       |> Decimal.to_integer()
       |> DateTime.from_unix!(:millisecond)
       |> DateTime.to_naive()
