@@ -131,6 +131,7 @@ defmodule Snowflex.Transport.Http.Type do
   end
 
   defp decode_by_type(value, "timestamp_ntz", _) do
+    IO.inspect(value)
     case NaiveDateTime.from_iso8601(value) do
       {:ok, datetime} -> datetime
       _ -> value
