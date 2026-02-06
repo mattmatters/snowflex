@@ -130,16 +130,27 @@ defmodule Snowflex.Transport.Http.Type do
     end
   end
 
-  defp decode_by_type(value, "timestamp_ntz", info) do
-    IO.inspect(info)
-    case NaiveDateTime.from_iso8601(value) do
-      {:ok, datetime} -> datetime
-      _ -> value
+  defp decode_by_type(value, "timestamp_ntz", type_info) do
+    scale = Map.get(type_info, "scale", 0)
+
+    if scale > 0 do
+      value
+      |> Decimal.new()
+      |> Decimal.mult(1000)
+      |> Decimal.to_integer()
+      |> DateTime.from_unix!(:millisecond)
+      |> DateTime.to_naive()
+    else
+      case NaiveDateTime.from_iso8601(value) do
+        {:ok, datetime} -> datetime
+        _ -> value
+      end
     end
   end
 
   defp decode_by_type(value, type, info) when type in ["timestamp_ltz", "timestamp_tz"] do
     IO.inspect(info)
+
     case DateTime.from_iso8601(value) do
       {:ok, datetime, _} -> datetime
       _ -> value
