@@ -409,6 +409,9 @@ defmodule Snowflex.Transport.Http do
       {:ok, %{body: %{"message" => message}}} ->
         {:error, %Error{message: message}}
 
+      {:ok, %{status: 406}} ->
+        {:error, %Error{message: "invalid request"}}
+
       {:error, err} ->
         {:error, %Error{message: inspect(err)}}
     end
@@ -849,6 +852,23 @@ defmodule Snowflex.Transport.Http do
       {"#{index}", value}
     end)
   end
+
+  # defp infer_binding_type(value) when is_binary(value), do: "TEXT"
+  # defp infer_binding_type(value) when is_integer(value), do: "FIXED"
+  # defp infer_binding_type(value) when is_float(value), do: "REAL"
+  # defp infer_binding_type(value) when is_boolean(value), do: "BOOLEAN"
+  # defp infer_binding_type(nil), do: "TEXT"
+  # defp infer_binding_type(%Date{}), do: "DATE"
+  # defp infer_binding_type(%DateTime{}), do: "TIMESTAMP_TZ"
+  # defp infer_binding_type(%NaiveDateTime{}), do: "TIMESTAMP_NTZ"
+  # defp infer_binding_type(%Time{}), do: "TIME"
+  # defp infer_binding_type(_), do: "TEXT"
+
+  # defp format_binding_value(%Date{} = d), do: Date.to_iso8601(d)
+  # defp format_binding_value(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+  # defp format_binding_value(%NaiveDateTime{} = ndt), do: NaiveDateTime.to_iso8601(ndt)
+  # defp format_binding_value(%Time{} = t), do: Time.to_iso8601(t)
+  # defp format_binding_value(value), do: to_string(value)
 
   defp maybe_refresh_token!(state) do
     now = :os.system_time(:second)
