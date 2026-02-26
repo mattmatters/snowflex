@@ -802,14 +802,13 @@ defmodule Snowflex.Transport.Http do
       bindings: params_to_bindings_v1(params),
       bindStage: nil,
       describeOnly: false,
-      parameters: request_params(opts),
+      parameters: request_params(state, opts),
       describedJobId: nil,
       isInternal: false,
       asyncExec: false
     }
 
     request_id = generate_uuid()
-    _warehouse = Keyword.get(opts, :warehouse, state.warehouse)
     url = "/queries/v1/query-request?requestId=#{request_id}"
 
     req_client = build_req_client(state)
@@ -881,9 +880,9 @@ defmodule Snowflex.Transport.Http do
     "MULTI_STATEMENT_COUNT" => "0"
   }
 
-  defp request_params(opts) do
+  defp request_params(_state, opts) do
     case Keyword.get(opts, :query_tag) do
-      tag when is_binary(tag) and byte_size(tag) > 0 ->
+      tag when is_binary(tag) ->
         Map.put(@default_request_params, "QUERY_TAG", tag)
 
       _any ->
