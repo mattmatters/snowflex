@@ -491,7 +491,7 @@ defmodule Snowflex.Transport.Http do
   defp fetch_s3_chunk(%{"url" => url}, encryption_key, encryption_key_md5) do
     headers = [
       {"Accept", "application/snowflake"},
-      {"x-amz-server-side-encryption-customer-algorithm", "AES256"},
+      # {"x-amz-server-side-encryption-customer-algorithm", "AES256"},
       {"x-amz-server-side-encryption-customer-key", encryption_key},
       {"x-amz-server-side-encryption-customer-key-md5", encryption_key_md5}
     ]
