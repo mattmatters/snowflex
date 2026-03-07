@@ -456,7 +456,7 @@ defmodule Snowflex.Transport.Http do
       Task.Supervisor.async_stream_nolink(
         Snowflex.TaskSupervisor,
         chunks,
-        fn chunk -> fetch_s3_chunk(chunk, key, md5) end,
+        fn chunk -> chunk |> IO.inspect() |> fetch_s3_chunk(key, md5) end,
         max_concurrency: max_concurrency,
         ordered: true,
         timeout: extended_timeout,
