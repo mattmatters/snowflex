@@ -504,7 +504,10 @@ defmodule Snowflex.Transport.Http do
         # Body might be JSON string
         case JSON.decode(body) do
           {:ok, rows} when is_list(rows) -> {:ok, rows}
-          _ -> {:error, %Error{message: "Failed to decode chunk"}}
+          err ->
+            IO.inspect(body, limit: :infinity)
+            IO.inspect(err)
+            {:error, %Error{message: "Failed to decode chunk"}}
         end
 
       {:ok, %{status: status, body: body}} ->
