@@ -456,7 +456,7 @@ defmodule Snowflex.Transport.Http do
       Task.Supervisor.async_stream_nolink(
         Snowflex.TaskSupervisor,
         chunks,
-        fn chunk -> chunk |> IO.inspect() |> fetch_s3_chunk(key, md5) end,
+        fn chunk -> fetch_s3_chunk(chunk, key, md5) end,
         max_concurrency: max_concurrency,
         ordered: true,
         timeout: extended_timeout,
@@ -496,7 +496,7 @@ defmodule Snowflex.Transport.Http do
       {"x-amz-server-side-encryption-customer-key-md5", encryption_key_md5}
     ]
 
-    case Req.get(url: url, headers: headers, receive_timeout: 180_000) |> IO.inspect(limit: :infinity) do
+    case Req.get(url: url, headers: headers, receive_timeout: 180_000) do
       {:ok, %{status: 200, body: body}} when is_list(body) ->
         {:ok, body}
 
@@ -504,10 +504,7 @@ defmodule Snowflex.Transport.Http do
         # Body might be JSON string
         case JSON.decode("[" <> body <> "]") do
           {:ok, rows} when is_list(rows) -> {:ok, rows}
-          err ->
-            IO.inspect(body, limit: :infinity, printable_limit: :infinity)
-            IO.inspect(err)
-            {:error, %Error{message: "Failed to decode chunk"}}
+          _ -> {:error, %Error{message: "Failed to decode chunk"}}
         end
 
       {:ok, %{status: status, body: body}} ->
