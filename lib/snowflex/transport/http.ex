@@ -502,7 +502,7 @@ defmodule Snowflex.Transport.Http do
 
       {:ok, %{status: 200, body: body}} when is_binary(body) ->
         # Body might be JSON string
-        case JSON.decode(body) do
+        case JSON.decode("[" <> body <> "]") do
           {:ok, rows} when is_list(rows) -> {:ok, rows}
           err ->
             IO.inspect(body, limit: :infinity, printable_limit: :infinity)
