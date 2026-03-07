@@ -496,7 +496,7 @@ defmodule Snowflex.Transport.Http do
       {"x-amz-server-side-encryption-customer-key-md5", encryption_key_md5}
     ]
 
-    case Req.get(url: url, headers: headers, receive_timeout: 180_000) do
+    case Req.get(url: url, headers: headers, receive_timeout: 180_000) |> IO.inspect(limit: :infinity) do
       {:ok, %{status: 200, body: body}} when is_list(body) ->
         {:ok, body}
 
