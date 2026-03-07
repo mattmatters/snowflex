@@ -270,11 +270,14 @@ defmodule Snowflex.Transport.Http do
   end
 
   def handle_call(:client, _from, state) do
+    state = maybe_refresh_token!(state)
     {:reply, build_req_client(state), state}
   end
 
   @impl GenServer
   def handle_call({:execute, statement, params, opts}, _from, state) do
+    state = maybe_refresh_token!(state)
+
     with {:ok, status, body} <- fetch_statement(state, statement, params, opts),
          #  After 45 seconds, Snowflake will return a 202 status code and a body with a statementHandle
          #  We need to poll for the result set
@@ -293,6 +296,8 @@ defmodule Snowflex.Transport.Http do
 
   # v1 API: declare stores query ID and chunk info for streaming
   def handle_call({:declare, statement, params, opts}, _from, state) do
+    state = maybe_refresh_token!(state)
+
     case fetch_statement(state, statement, params, opts) do
       {:ok, _status, %{"queryId" => query_id, "rowtype" => rowtype, "chunks" => chunks} = data}
       when is_list(chunks) ->
@@ -872,8 +877,6 @@ defmodule Snowflex.Transport.Http do
 
   defp maybe_refresh_token!(state) do
     now = :os.system_time(:second)
-    IO.inspect(now)
-    IO.inspect(state)
 
     case state do
       %{token: token, token_type: token_type, token_expires_at: expires_at}
