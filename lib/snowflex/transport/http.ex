@@ -872,6 +872,8 @@ defmodule Snowflex.Transport.Http do
 
   defp maybe_refresh_token!(state) do
     now = :os.system_time(:second)
+    IO.inspect(now)
+    IO.inspect(state)
 
     case state do
       %{token: token, token_type: token_type, token_expires_at: expires_at}
