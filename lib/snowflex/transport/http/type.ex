@@ -131,6 +131,7 @@ defmodule Snowflex.Transport.Http.Type do
   end
 
   defp decode_by_type(value, "timestamp_ntz", type_info) do
+    IO.inspect(type_info)
     scale = Map.get(type_info, "scale", 0)
 
     if scale > 0 do
