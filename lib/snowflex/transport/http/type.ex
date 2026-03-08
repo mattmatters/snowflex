@@ -135,11 +135,11 @@ defmodule Snowflex.Transport.Http.Type do
 
     if scale > 0 do
       value
-      # |> Decimal.new()
-      # |> Decimal.mult(Integer.pow(10, 9 - scale))
-      # |> Decimal.round(0, :floor)
-      # |> Decimal.to_integer()
-      |> DateTime.from_unix!(:microsecond)
+      |> Decimal.new()
+      |> Decimal.mult(Integer.pow(10, 9 - scale))
+      |> Decimal.round(0, :floor)
+      |> Decimal.to_integer()
+      |> DateTime.from_unix!(:nanosecond)
       |> DateTime.to_naive()
     else
       case NaiveDateTime.from_iso8601(value) do
