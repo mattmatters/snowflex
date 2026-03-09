@@ -138,6 +138,7 @@ defmodule Snowflex.Transport.Http do
   alias JOSE.JWT
   alias Snowflex.Error
   alias Snowflex.Result
+  alias __MODULE__.Type
 
   require Logger
 
@@ -803,39 +804,7 @@ defmodule Snowflex.Transport.Http do
   end
 
   defp map_value(nil, _col), do: nil
-  defp map_value(value, %{"type" => "fixed", "scale" => 0}), do: parse_integer(value)
-  defp map_value(value, %{"type" => "fixed"}), do: parse_decimal(value)
-  defp map_value(value, %{"type" => "real"}), do: parse_float(value)
-  defp map_value(value, %{"type" => "boolean"}), do: value == "true" or value == true
-  defp map_value(value, %{"type" => "date"}), do: value
-  defp map_value(value, %{"type" => "time"}), do: value
-  # TODO I believe I need to handle these here instead of the other type spot
-  defp map_value(value, %{"type" => "timestamp_ntz"}), do: value
-  defp map_value(value, %{"type" => "timestamp_tz"}), do: value
-  defp map_value(value, %{"type" => "timestamp_ltz"}), do: value
-  defp map_value(value, _col), do: value
-
-  defp parse_integer(value) when is_integer(value), do: value
-  defp parse_integer(value) when is_binary(value), do: String.to_integer(value)
-  defp parse_integer(value), do: value
-
-  defp parse_float(value) when is_float(value), do: value
-
-  defp parse_float(value) when is_binary(value) do
-    {val, _} = Float.parse(value)
-    val
-  end
-
-  defp parse_float(value), do: value
-
-  defp parse_decimal(value) when is_binary(value) do
-    case Decimal.parse(value) do
-      {decimal, ""} -> decimal
-      _ -> value
-    end
-  end
-
-  defp parse_decimal(value), do: value
+  defp map_value(value, col), do: Type.decode(value, %{type: col})
 
   # HTTP Calls
 
