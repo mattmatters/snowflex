@@ -299,31 +299,45 @@ defmodule Snowflex.Transport.Http do
     state = maybe_refresh_token!(state)
 
     case fetch_statement(state, statement, params, opts) do
+      # Chunked response
       {:ok, _status, %{"queryId" => query_id, "rowtype" => rowtype, "chunks" => chunks} = data}
       when is_list(chunks) ->
         chunk_count = length(chunks)
 
-        {:reply, {:ok, chunk_count},
-         %{
-           state
-           | current_statement: query_id,
-             current_partition: 0,
-             result_metadata: %{
-               "rowType" => rowtype,
-               "chunks" => chunks,
-               "chunkHeaders" => data["chunkHeaders"]
-             }
-         }}
+        state = %{
+          state
+          | current_statement: query_id,
+            current_partition: 0,
+            result_metadata: %{
+              "rowType" => rowtype,
+              "chunks" => chunks,
+              "chunkHeaders" => data["chunkHeaders"]
+            }
+        }
 
+        {:reply, {:ok, chunk_count}, state}
+
+      # No chunks, single result set, buffer till requested
+      {:ok, _status, %{"queryId" => query_id, "rowtype" => rowtype, "rowset" => rowset}} ->
+        state = %{
+          state
+          | current_statement: query_id,
+            current_partition: 0,
+            result_metadata: %{"rowType" => rowtype, "rowset" => rowset}
+        }
+
+        {:reply, {:ok, 0}, state}
+
+      # No results
       {:ok, _status, %{"queryId" => query_id, "rowtype" => rowtype}} ->
-        # No chunks, single result set
-        {:reply, {:ok, 0},
-         %{
-           state
-           | current_statement: query_id,
-             current_partition: 0,
-             result_metadata: %{"rowType" => rowtype}
-         }}
+        state = %{
+          state
+          | current_statement: query_id,
+            current_partition: 0,
+            result_metadata: %{"rowType" => rowtype}
+        }
+
+        {:reply, {:ok, 0}, state}
 
       {:error, error} ->
         {:reply, {:error, error}, state}
@@ -360,6 +374,28 @@ defmodule Snowflex.Transport.Http do
       {:error, error} ->
         {:reply, {:error, error}, state}
     end
+  end
+
+  # Special case of buffered single result
+  def handle_call(
+        {:fetch, 0, _opts},
+        _from,
+        %{
+          current_partition: 0,
+          result_metadata: %{"rowType" => rowtype, "rowset" => rowset} = metadata
+        } = state
+      ) do
+    mapped_rows = map_rows(rowset, rowtype)
+
+    result = %Result{
+      columns: Enum.map(rowtype, & &1["name"]),
+      rows: mapped_rows,
+      num_rows: length(mapped_rows)
+    }
+
+    metadata = Map.delete(metadata, "rowset")
+
+    {:reply, {:cont, result}, %{state | result_metadata: metadata}}
   end
 
   # No chunks or no more partitions
