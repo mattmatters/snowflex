@@ -355,7 +355,7 @@ defmodule Snowflex.Transport.Http do
           num_rows: length(mapped_rows)
         }
 
-        {:reply, {:ok, result}, %{state | current_partition: current_partition + 1}}
+        {:reply, {:cont, result}, %{state | current_partition: current_partition + 1}}
 
       {:error, error} ->
         {:reply, {:error, error}, state}
