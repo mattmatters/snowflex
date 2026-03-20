@@ -156,7 +156,9 @@ defmodule Snowflex.Transport.Http.Type do
     end
   end
 
-  defp decode_by_type(value, "date", _) do
+  defp decode_by_type(value, "date", stuff) do
+    IO.inspect(value)
+    IO.inspect(stuff)
     case Date.from_iso8601(value) do
       {:ok, date} -> date
       _ -> value
@@ -176,9 +178,5 @@ defmodule Snowflex.Transport.Http.Type do
   end
 
   # Default for text and other types - return as is
-  defp decode_by_type(value, stff, thing) do
-    IO.inspect(stff)
-    IO.inspect(thing)
-    value
-  end
+  defp decode_by_type(value, stff, thing), do: value
 end
