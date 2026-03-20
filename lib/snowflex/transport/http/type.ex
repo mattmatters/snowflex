@@ -176,5 +176,9 @@ defmodule Snowflex.Transport.Http.Type do
   end
 
   # Default for text and other types - return as is
-  defp decode_by_type(value, _, _), do: value
+  defp decode_by_type(value, stff, thing) do
+    IO.inspect(stff)
+    IO.inspect(thing)
+    value
+  end
 end
