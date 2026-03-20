@@ -157,9 +157,17 @@ defmodule Snowflex.Transport.Http.Type do
   end
 
   defp decode_by_type(value, "date", _) do
-    case Date.from_iso8601(value) do
-      {:ok, date} -> date
-      _ -> value
+    # Snowflake returns dates as number of days since Unix epoch (1970-01-01)
+    case Integer.parse(value) do
+      {days, ""} ->
+        Date.add(~D[1970-01-01], days)
+
+      _ ->
+        # Fallback to ISO8601 parsing if not a numeric value (should never happen)
+        case Date.from_iso8601(value) do
+          {:ok, date} -> date
+          _ -> value
+        end
     end
   end
 
