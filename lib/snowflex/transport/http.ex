@@ -327,7 +327,7 @@ defmodule Snowflex.Transport.Http do
             result_metadata: %{"rowType" => rowtype, "rowset" => rowset}
         }
 
-        {:reply, {:ok, 0}, state}
+        {:reply, {:ok, 1}, state}
 
       # No results
       {:ok, _status, %{"queryId" => query_id, "rowtype" => rowtype}} ->
@@ -354,7 +354,7 @@ defmodule Snowflex.Transport.Http do
           result_metadata: %{"chunks" => chunks, "chunkHeaders" => headers} = metadata
         } = state
       )
-      when current_partition <= max_partition and is_list(chunks) do
+      when current_partition < max_partition and is_list(chunks) do
     chunk = Enum.at(chunks, current_partition)
 
     case fetch_s3_chunk(chunk, headers) do
@@ -377,7 +377,7 @@ defmodule Snowflex.Transport.Http do
 
   # Special case of buffered single result
   def handle_call(
-        {:fetch, 0, _opts},
+        {:fetch, 1, _opts},
         _from,
         %{
           current_partition: 0,
@@ -526,7 +526,7 @@ defmodule Snowflex.Transport.Http do
   end
 
   defp fetch_s3_chunk(%{"url" => url}, chunk_headers) do
-    headers = Map.put(chunk_headers, "Accept", "application/snowflake")
+    headers = Map.put(chunk_headers, "accept", "application/snowflake")
 
     case Req.get(url: url, headers: headers, receive_timeout: 180_000) do
       {:ok, %{status: 200, body: body}} when is_list(body) ->
