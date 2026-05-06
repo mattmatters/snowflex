@@ -356,10 +356,8 @@ defmodule Snowflex.Transport.Http do
       )
       when current_partition <= max_partition and is_list(chunks) do
     chunk = Enum.at(chunks, current_partition)
-    key = headers["x-amz-server-side-encryption-customer-key"]
-    md5 = headers["x-amz-server-side-encryption-customer-key-md5"]
 
-    case fetch_s3_chunk(chunk, key, md5) do
+    case fetch_s3_chunk(chunk, headers) do
       {:ok, rows} ->
         rowtype = metadata["rowType"]
         mapped_rows = map_rows(rows, rowtype)
@@ -480,10 +478,7 @@ defmodule Snowflex.Transport.Http do
          _state,
          %{
            "chunks" => chunks,
-           "chunkHeaders" => %{
-             "x-amz-server-side-encryption-customer-key" => key,
-             "x-amz-server-side-encryption-customer-key-md5" => md5
-           },
+           "chunkHeaders" => chunk_headers,
            "rowset" => initial_rowset,
            "rowtype" => _rowtype
          } = body,
@@ -498,7 +493,7 @@ defmodule Snowflex.Transport.Http do
       Task.Supervisor.async_stream_nolink(
         Snowflex.TaskSupervisor,
         chunks,
-        fn chunk -> fetch_s3_chunk(chunk, key, md5) end,
+        fn chunk -> fetch_s3_chunk(chunk, chunk_headers) end,
         max_concurrency: max_concurrency,
         ordered: true,
         timeout: extended_timeout,
@@ -530,13 +525,8 @@ defmodule Snowflex.Transport.Http do
     {:ok, body}
   end
 
-  defp fetch_s3_chunk(%{"url" => url}, encryption_key, encryption_key_md5) do
-    headers = [
-      {"Accept", "application/snowflake"},
-      # {"x-amz-server-side-encryption-customer-algorithm", "AES256"},
-      {"x-amz-server-side-encryption-customer-key", encryption_key},
-      {"x-amz-server-side-encryption-customer-key-md5", encryption_key_md5}
-    ]
+  defp fetch_s3_chunk(%{"url" => url}, chunk_headers) do
+    headers = Map.put(chunk_headers, "Accept", "application/snowflake")
 
     case Req.get(url: url, headers: headers, receive_timeout: 180_000) do
       {:ok, %{status: 200, body: body}} when is_list(body) ->
