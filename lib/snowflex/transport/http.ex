@@ -143,7 +143,7 @@ defmodule Snowflex.Transport.Http do
   require Logger
 
   @default_token_lifetime :timer.minutes(10)
-  @default_timeout :timer.seconds(45)
+  @default_timeout :timer.minutes(5)
   defmodule State do
     @moduledoc false
     @derive {Inspect, except: [:private_key, :private_key_password]}
@@ -423,9 +423,12 @@ defmodule Snowflex.Transport.Http do
 
   defp poll_query_status(state, query_id) do
     url = "/monitoring/queries/#{query_id}"
-    req_client = build_req_client(state)
 
-    case Req.get(req_client, url: url, receive_timeout: state.timeout) do
+    state
+    |> build_req_client()
+    |> Req.Request.put_header("accept", "application/json")
+    |> Req.get(url: url, receive_timeout: state.timeout)
+    |> case do
       {:ok, %{status: 200, body: %{"data" => %{"queries" => [%{"status" => status}]}}}}
       when status in ["RUNNING", "QUEUED", "RESUMING_WAREHOUSE"] ->
         Process.sleep(state.async_poll_interval)
