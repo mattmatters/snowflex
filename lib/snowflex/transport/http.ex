@@ -844,7 +844,6 @@ defmodule Snowflex.Transport.Http do
   end
 
   defp params_to_bindings_v1(params) when map_size(params) == 0, do: nil
-  defp params_to_bindings_v1(params) when params == %{}, do: nil
 
   defp params_to_bindings_v1(params) do
     params
