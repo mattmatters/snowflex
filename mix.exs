@@ -28,14 +28,19 @@ defmodule Snowflex.MixProject do
         plt_core_path: "priv/plts/core.plt"
       ],
       test_coverage: [tool: ExCoveralls],
-      preferred_cli_env: [
+      docs: docs(),
+      elixirc_paths: elixirc_paths(Mix.env())
+    ]
+  end
+
+  def cli do
+    [
+      preferred_envs: [
         coveralls: :test,
         "coveralls.detail": :test,
         "coveralls.post": :test,
         "coveralls.html": :test
-      ],
-      docs: docs(),
-      elixirc_paths: elixirc_paths(Mix.env())
+      ]
     ]
   end
 
