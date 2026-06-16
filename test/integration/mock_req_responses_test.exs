@@ -35,23 +35,33 @@ defmodule Snowflex.MockReqResponsesTest do
 
       private_key_path = Path.join(File.cwd!(), "test/fixtures/fake_private_key.pem")
 
-      ReqTest.stub(MockHttp, fn
-        %{params: %{"statement" => "SELECT 1"}} = conn ->
-          # Health check
-          ReqTest.json(conn, %{})
+      # The transport sends the statement as `sqlText` in the JSON body (only
+      # `requestId` is a query param), so dispatch on the decoded body.
+      ReqTest.stub(MockHttp, fn conn ->
+        {:ok, raw_body, conn} = Conn.read_body(conn)
+        statement = raw_body |> Jason.decode!() |> Map.get("sqlText")
 
-        %{params: %{"statement" => _statement}} = conn ->
-          # Response to mock statement with error including statementHandle
-          conn
-          |> Conn.put_resp_content_type("application/json")
-          |> Conn.send_resp(
-            529,
-            Jason.encode!(%{
-              "code" => "529",
-              "message" => "Server too busy. Please retry.",
-              "statementHandle" => "01b7e043-0206-7a43-0008-8b8300073d86"
-            })
-          )
+        case statement do
+          "SELECT 1" ->
+            # Health check performed during connect/1 — must look like a successful
+            # query (`%{"success" => true, "data" => ...}`) or the connection never
+            # establishes and queries die in the pool checkout queue.
+            ReqTest.json(conn, %{"success" => true, "data" => %{}})
+
+          _ ->
+            # Error response, shaped like Snowflake's: code/message plus a `data`
+            # object carrying the queryId the transport surfaces as query metadata.
+            conn
+            |> Conn.put_resp_content_type("application/json")
+            |> Conn.send_resp(
+              529,
+              Jason.encode!(%{
+                "code" => "529",
+                "message" => "Server too busy. Please retry.",
+                "data" => %{"queryId" => "01b7e043-0206-7a43-0008-8b8300073d86"}
+              })
+            )
+        end
       end)
 
       Req.default_options(plug: {Req.Test, MockHttp})
