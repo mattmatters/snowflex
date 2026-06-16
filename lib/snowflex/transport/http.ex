@@ -140,8 +140,6 @@ defmodule Snowflex.Transport.Http do
   alias Snowflex.Result
   alias __MODULE__.Type
 
-  require Logger
-
   @default_token_lifetime :timer.minutes(10)
   @default_timeout :timer.minutes(5)
   defmodule State do
