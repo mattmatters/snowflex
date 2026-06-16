@@ -15,9 +15,10 @@ defmodule Snowflex.Connection do
           pid: pid(),
           transport: any(),
           state: :not_connected | :connected,
+          transaction_status: :idle | :transaction,
           opts: Keyword.t()
         }
-  defstruct [:pid, :transport, :opts, state: :not_connected]
+  defstruct [:pid, :transport, :opts, state: :not_connected, transaction_status: :idle]
 
   ## DBConnection Callbacks
 
@@ -121,7 +122,7 @@ defmodule Snowflex.Connection do
 
     case transport.fetch(state.pid, cursor, opts) do
       {:cont, result} ->
-        {:cont, result, query, state}
+        {:cont, result, state}
 
       {:halt, result} ->
         {:halt, result, state}
@@ -133,24 +134,34 @@ defmodule Snowflex.Connection do
   end
 
   # Transaction Callbacks
+  #
+  # Snowflake's SQL API is auto-commit and has no session-level transactions.
+  # DBConnection, however, requires a transaction (or `run/3`) context to lend a
+  # locked connection for cursor-based streaming (`DBConnection.stream/4`). These
+  # callbacks are intentional no-ops: they satisfy DBConnection's bookkeeping so
+  # streaming works, without ever issuing BEGIN/COMMIT/ROLLBACK to Snowflake.
+  #
+  # IMPORTANT: because nothing is sent to Snowflake, `transaction/2` provides NO
+  # atomicity guarantees. A failure mid-"transaction" does not roll back prior
+  # statements. Do not rely on these for write atomicity.
   @impl DBConnection
   def handle_begin(_opts, state) do
-    {:disconnect, Error.exception("Snowflex does not support transactions"), state}
+    {:ok, %Result{}, %{state | transaction_status: :transaction}}
   end
 
   @impl DBConnection
   def handle_commit(_opts, state) do
-    {:disconnect, Error.exception("Snowflex does not support transactions"), state}
+    {:ok, %Result{}, %{state | transaction_status: :idle}}
   end
 
   @impl DBConnection
   def handle_rollback(_opts, state) do
-    {:disconnect, Error.exception("Snowflex does not support transactions"), state}
+    {:ok, %Result{}, %{state | transaction_status: :idle}}
   end
 
   @impl DBConnection
-  def handle_status(_opts, state) do
-    {:disconnect, Error.exception("Snowflex does not support transactions"), state}
+  def handle_status(_opts, %{transaction_status: transaction_status} = state) do
+    {transaction_status, state}
   end
 
   ## Helpers

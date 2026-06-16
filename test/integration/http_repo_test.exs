@@ -213,13 +213,18 @@ defmodule HttpRepoTest do
   end
 
   describe "stream/2" do
-    # streaming shouldd work WITHOUT a transaction
+    # Streaming runs through the shared Ecto SQL cursor machinery, which requires
+    # a transaction context. Snowflake has no real transactions, so this one is a
+    # no-op (see `Snowflex.Connection`) — it exists only to lend the cursor a
+    # locked connection.
     test "can stream records" do
-      results =
-        User
-        |> limit(10)
-        |> Http.stream()
-        |> Enum.to_list()
+      {:ok, results} =
+        Http.transaction(fn ->
+          User
+          |> limit(10)
+          |> Http.stream()
+          |> Enum.to_list()
+        end)
 
       assert is_list(results)
       assert length(results) <= 10
@@ -227,11 +232,13 @@ defmodule HttpRepoTest do
     end
 
     test "can stream with chunk size" do
-      results =
-        User
-        |> limit(20)
-        |> Http.stream(max_rows: 5)
-        |> Enum.to_list()
+      {:ok, results} =
+        Http.transaction(fn ->
+          User
+          |> limit(20)
+          |> Http.stream(max_rows: 5)
+          |> Enum.to_list()
+        end)
 
       assert is_list(results)
       assert length(results) <= 20

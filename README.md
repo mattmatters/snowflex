@@ -152,6 +152,21 @@ The adapter supports the following type conversions:
 
 Snowflex does not support multi-statement transactions. The reason for this is the [Snowflake SQL API](https://docs.snowflake.com/en/developer-guide/sql-api/submitting-multiple-statements) does not support multi-request transactions. That is to say, all statements in a transaction _must_ be sent in the same request. Because it is a common pattern to rely on the results of a previous statement in further downstream queries in the same transaction (e.g. `Ecto.Multi`), this limitation in the SQL API meant that we either needed to provide a potentially unintuitive use case, or just not support them at all.
 
+> [!WARNING]
+> **`Repo.transaction/2` is a FAKE, no-op transaction.** Snowflake's SQL API has
+> no session-level transactions, so `begin`/`commit`/`rollback` send **nothing**
+> to Snowflake — they only satisfy `DBConnection`'s bookkeeping so that
+> cursor-based streaming (which requires a transaction context) can borrow a
+> locked connection. This means:
+>
+> - There is **NO atomicity**. A failure part-way through a `Repo.transaction/2`
+>   block does **not** roll back the statements that already ran.
+> - `Repo.rollback/1` does not undo anything on Snowflake's end.
+>
+> The fake transaction exists **solely** to enable `Repo.stream/2` (see
+> [Streaming](#streaming)). Do not wrap writes in `Repo.transaction/2` expecting
+> all-or-nothing semantics — you will not get them.
+
 ### Multiple Statements
 
 Snowflex supports submitting multiple statements in the same query and will return the results of each statement packed into an array.
@@ -172,9 +187,19 @@ iex> Repo.query("SELECT 1; SELECT 2;")
 
 ### Streaming
 
-When streaming rows using `Snowflex.Transport.Http`, keep in mind that [Snowflake dictates the number of partitions returned](https://docs.snowflake.com/en/developer-guide/sql-api/handling-responses#retrieving-additional-partitions). This is different than a normal TCP protocol like `Postgrex`, where the stream will be iterating on one row at a time.
+`Repo.stream/2` goes through the shared `Ecto.Adapters.SQL` cursor machinery, so — as with every Ecto SQL adapter — **it must be consumed inside a `Repo.transaction/2`**:
 
-Internally we utilize the same `Stream` modules as other implementations, but because each traunch of results is being determined externally to your app, that memory usage will be higher than if we were bringing back one row at a time.
+``` elixir
+Repo.transaction(fn ->
+  Post
+  |> Repo.stream()
+  |> Enum.each(&process/1)
+end)
+```
+
+That transaction is the FAKE, no-op transaction described under [Transactions](#transactions) — nothing is sent to Snowflake; it exists only to lend the cursor a locked connection.
+
+When streaming rows using `Snowflex.Transport.Http`, keep in mind that [Snowflake dictates the number of partitions returned](https://docs.snowflake.com/en/developer-guide/sql-api/handling-responses#retrieving-additional-partitions). This is different than a normal TCP protocol like `Postgrex`, where the stream iterates one row at a time. The cursor fetches **one partition (chunk) per `handle_fetch/4`** rather than materializing the entire result set up front, but a single chunk is still the smallest unit pulled into memory, so peak memory tracks Snowflake's partition size rather than a single row.
 
 ### Migrations
 
