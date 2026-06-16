@@ -14,8 +14,8 @@ defmodule Snowflex.Result do
   * `:request_id` - The ID of the request that was executed
   * `:sql_state` - The SQL state of the query that was executed
   """
-  defstruct columns: nil,
-            rows: nil,
+  defstruct columns: [],
+            rows: [],
             num_rows: 0,
             metadata: [],
             messages: [],
