@@ -82,6 +82,10 @@ defmodule Snowflex.Connection do
       {:ok, result} ->
         {:ok, query, result, state}
 
+      {:disconnect, reason} ->
+        enrich_logger_metadata_from_error(reason)
+        {:disconnect, reason, state}
+
       {:error, reason} ->
         enrich_logger_metadata_from_error(reason)
         {:error, reason, state}
@@ -101,6 +105,10 @@ defmodule Snowflex.Connection do
     case transport.declare(state.pid, query.statement, params, opts) do
       {:ok, cursor} ->
         {:ok, query, cursor, state}
+
+      {:disconnect, reason} ->
+        enrich_logger_metadata_from_error(reason)
+        {:disconnect, reason, state}
 
       {:error, reason} ->
         enrich_logger_metadata_from_error(reason)
@@ -124,6 +132,10 @@ defmodule Snowflex.Connection do
 
       {:halt, result} ->
         {:halt, result, state}
+
+      {:disconnect, reason} ->
+        enrich_logger_metadata_from_error(reason)
+        {:disconnect, reason, state}
 
       {:error, reason} ->
         enrich_logger_metadata_from_error(reason)

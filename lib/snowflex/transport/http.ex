@@ -215,24 +215,71 @@ defmodule Snowflex.Transport.Http do
     try do
       GenServer.call(pid, {:execute, statement, params, opts}, opts[:timeout])
     catch
+      # A timed-out/crashed GenServer.call leaves the transport wedged on the
+      # in-flight request. Disconnect so DBConnection evicts the connection
+      # instead of returning a poisoned one to the pool.
       :exit, {:timeout, _} ->
-        {:error, Error.exception("#{statement} timed out after #{inspect(opts[:timeout])}")}
+        err =
+          DBConnection.ConnectionError.exception(
+            message: "#{statement} timed out after #{inspect(opts[:timeout])}",
+            reason: :timeout
+          )
+
+        {:disconnect, err}
 
       :exit, reason ->
-        {:error, Error.exception("#{statement} failed due to #{inspect(reason)}")}
+        err =
+          DBConnection.ConnectionError.exception("#{statement} failed due to #{inspect(reason)}")
+
+        {:disconnect, err}
     end
   end
 
   @impl Snowflex.Transport
   def declare(pid, statement, params, opts) do
     opts = add_default_timeout(opts)
-    GenServer.call(pid, {:declare, statement, params, opts}, opts[:timeout])
+
+    try do
+      GenServer.call(pid, {:declare, statement, params, opts}, opts[:timeout])
+    catch
+      :exit, {:timeout, _} ->
+        err =
+          DBConnection.ConnectionError.exception(
+            message: "#{statement} timed out after #{inspect(opts[:timeout])}",
+            reason: :timeout
+          )
+
+        {:disconnect, err}
+
+      :exit, reason ->
+        err =
+          DBConnection.ConnectionError.exception("#{statement} failed due to #{inspect(reason)}")
+
+        {:disconnect, err}
+    end
   end
 
   @impl Snowflex.Transport
   def fetch(pid, cursor, opts) do
     opts = add_default_timeout(opts)
-    GenServer.call(pid, {:fetch, cursor, opts}, opts[:timeout])
+
+    try do
+      GenServer.call(pid, {:fetch, cursor, opts}, opts[:timeout])
+    catch
+      :exit, {:timeout, _} ->
+        err =
+          DBConnection.ConnectionError.exception(
+            message: "fetch timed out after #{inspect(opts[:timeout])}",
+            reason: :timeout
+          )
+
+        {:disconnect, err}
+
+      :exit, reason ->
+        err = DBConnection.ConnectionError.exception("fetch failed due to #{inspect(reason)}")
+
+        {:disconnect, err}
+    end
   end
 
   @impl Snowflex.Transport

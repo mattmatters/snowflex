@@ -24,10 +24,14 @@ defmodule Snowflex.Transport.HttpTest do
     end
   end
 
-  test "execute_statement/4 handles timeout" do
+  test "execute_statement/4 disconnects on timeout" do
     {:ok, pid} = start_supervised(DummyHttp, %{})
 
-    assert {:error, %Error{message: "Select 1 timed out after 10"}} =
+    assert {:disconnect,
+            %DBConnection.ConnectionError{
+              message: "Select 1 timed out after 10",
+              reason: :timeout
+            }} =
              Http.execute_statement(pid, "Select 1", nil, timeout: 10)
 
     assert %{} = Http.execute_statement(pid, nil, nil, timeout: 1000)
