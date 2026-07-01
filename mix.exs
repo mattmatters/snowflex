@@ -75,7 +75,7 @@ defmodule Snowflex.MixProject do
       {:ecto_sql, "~> 3.12"},
       {:db_connection, "~> 2.4"},
       # HTTP
-      {:req, "~> 0.5"},
+      {:req, "~> 0.5 or ~> 0.6"},
       {:plug, "~> 1.0"},
       {:jose, "~> 1.11"},
       {:jason, "~> 1.0"},

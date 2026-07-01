@@ -17,6 +17,74 @@ defmodule Snowflex.MockReqResponsesTest do
       adapter: Snowflex
   end
 
+  describe "compressed chunks" do
+    setup do
+      private_key_path = Path.expand("../fixtures/fake_private_key.pem", __DIR__)
+
+      ReqTest.stub(MockHttp, fn
+        %{method: "GET", host: "chunks.example.test"} = conn ->
+          conn
+          |> Conn.put_resp_content_type("application/snowflake")
+          |> Conn.put_resp_header("content-encoding", "gzip")
+          |> Conn.send_resp(200, :zlib.gzip(~s(["42","decoded"],["43","still decoded"])))
+
+        conn ->
+          statement =
+            conn
+            |> ReqTest.raw_body()
+            |> IO.iodata_to_binary()
+            |> Jason.decode!()
+            |> Map.get("sqlText")
+
+          case statement do
+            "SELECT 1" ->
+              ReqTest.json(conn, %{"success" => true, "data" => %{}})
+
+            "SELECT * FROM CHUNKED_ROWS" ->
+              ReqTest.json(conn, %{
+                "success" => true,
+                "data" => %{
+                  "queryId" => "01b7e043-0206-7a43-0008-8b8300073d86",
+                  "rowtype" => [
+                    %{"name" => "ID", "type" => "FIXED", "scale" => 0},
+                    %{"name" => "NAME", "type" => "TEXT"}
+                  ],
+                  "rowset" => [],
+                  "chunks" => [%{"url" => "https://chunks.example.test/chunk-1"}],
+                  "chunkHeaders" => %{},
+                  "total" => 2
+                }
+              })
+          end
+      end)
+
+      Req.default_options(plug: {Req.Test, MockHttp})
+
+      start_link_supervised!(
+        {TestSnowflakeRepo,
+         [
+           account_name: "test_acc",
+           username: "test_usr",
+           private_key_path: private_key_path,
+           public_key_fingerprint:
+             "4dfd2c71b73c0c5a600c5e96004ca52204dfd74632e8e53738770538f7b8af5c",
+           role: "fake_role",
+           warehouse: "fake_warehouse"
+         ]}
+      )
+
+      :ok
+    end
+
+    test "decodes gzip-compressed chunk responses" do
+      result = TestSnowflakeRepo.query!("SELECT * FROM CHUNKED_ROWS")
+
+      assert result.columns == ["ID", "NAME"]
+      assert result.rows == [[42, "decoded"], [43, "still decoded"]]
+      assert result.num_rows == 2
+    end
+  end
+
   describe "Error Handling for Req raised errors" do
     setup do
       # Configure Logger to accept Snowflex metadata keys
