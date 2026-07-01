@@ -576,7 +576,7 @@ defmodule Snowflex.Transport.Http do
   defp fetch_s3_chunk(%{"url" => url}, chunk_headers) do
     headers = Map.put(chunk_headers, "accept", "application/snowflake")
 
-    case Req.get(url: url, headers: headers, receive_timeout: 180_000) do
+    case Req.get(url: url, headers: headers, receive_timeout: 180_000, compressed: true) do
       {:ok, %{status: 200, body: body}} when is_list(body) ->
         {:ok, body}
 
