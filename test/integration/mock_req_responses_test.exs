@@ -85,6 +85,89 @@ defmodule Snowflex.MockReqResponsesTest do
     end
   end
 
+  describe "async query execution while streaming" do
+    @async_query_id "01c57ef7-0106-728c-000a-ce2e019c4fba"
+
+    setup do
+      private_key_path = Path.expand("../fixtures/fake_private_key.pem", __DIR__)
+
+      # A slow query returns an async handle (queryId + getResultUrl, no rowtype)
+      # instead of an inline result set. declare/4 must poll it to completion before
+      # streaming, the same way execute/4 does, or the cursor path CaseClauseErrors.
+      ReqTest.stub(MockHttp, fn conn ->
+        case {conn.method, conn.request_path} do
+          # Poll: query finished successfully.
+          {"GET", "/monitoring/queries/" <> _id} ->
+            ReqTest.json(conn, %{"data" => %{"queries" => [%{"status" => "SUCCESS"}]}})
+
+          # Result fetch: the real rows, now that the query is done.
+          {"GET", "/queries/" <> _rest} ->
+            ReqTest.json(conn, %{
+              "success" => true,
+              "data" => %{
+                "queryId" => @async_query_id,
+                "rowtype" => [%{"name" => "GREETING", "type" => "TEXT"}],
+                "rowset" => [["hello"], ["world"]],
+                "total" => 2
+              }
+            })
+
+          {"POST", _path} ->
+            statement =
+              conn
+              |> ReqTest.raw_body()
+              |> IO.iodata_to_binary()
+              |> Jason.decode!()
+              |> Map.get("sqlText")
+
+            case statement do
+              "SELECT 1" ->
+                ReqTest.json(conn, %{"success" => true, "data" => %{}})
+
+              _ ->
+                ReqTest.json(conn, %{
+                  "success" => true,
+                  "data" => %{
+                    "queryId" => @async_query_id,
+                    "getResultUrl" => "/queries/#{@async_query_id}/result",
+                    "progressDesc" => nil,
+                    "queryAbortsAfterSecs" => 300
+                  }
+                })
+            end
+        end
+      end)
+
+      Req.default_options(plug: {Req.Test, MockHttp})
+
+      start_link_supervised!(
+        {TestSnowflakeRepo,
+         [
+           account_name: "test_acc",
+           username: "test_usr",
+           private_key_path: private_key_path,
+           public_key_fingerprint:
+             "4dfd2c71b73c0c5a600c5e96004ca52204dfd74632e8e53738770538f7b8af5c",
+           role: "fake_role",
+           warehouse: "fake_warehouse"
+         ]}
+      )
+
+      :ok
+    end
+
+    test "streaming resolves an async result handle" do
+      {:ok, rows} =
+        TestSnowflakeRepo.transaction(fn ->
+          TestSnowflakeRepo
+          |> Ecto.Adapters.SQL.stream("SELECT * FROM SLOW_TABLE")
+          |> Enum.flat_map(& &1.rows)
+        end)
+
+      assert rows == [["hello"], ["world"]]
+    end
+  end
+
   describe "Error Handling for Req raised errors" do
     setup do
       # Configure Logger to accept Snowflex metadata keys
