@@ -344,49 +344,13 @@ defmodule Snowflex.Transport.Http do
   def handle_call({:declare, statement, params, opts}, _from, state) do
     state = maybe_refresh_token!(state)
 
-    case fetch_statement(state, statement, params, opts) do
-      # Chunked response
-      {:ok, _status, %{"queryId" => query_id, "rowtype" => rowtype, "chunks" => chunks} = data}
-      when is_list(chunks) ->
-        chunk_count = length(chunks)
-
-        state = %{
-          state
-          | current_statement: query_id,
-            current_partition: 0,
-            result_metadata: %{
-              "rowType" => rowtype,
-              "chunks" => chunks,
-              "chunkHeaders" => data["chunkHeaders"]
-            }
-        }
-
-        {:reply, {:ok, chunk_count}, state}
-
-      # No chunks, single result set, buffer till requested
-      {:ok, _status, %{"queryId" => query_id, "rowtype" => rowtype, "rowset" => rowset}} ->
-        state = %{
-          state
-          | current_statement: query_id,
-            current_partition: 0,
-            result_metadata: %{"rowType" => rowtype, "rowset" => rowset}
-        }
-
-        {:reply, {:ok, 1}, state}
-
-      # No results
-      {:ok, _status, %{"queryId" => query_id, "rowtype" => rowtype}} ->
-        state = %{
-          state
-          | current_statement: query_id,
-            current_partition: 0,
-            result_metadata: %{"rowType" => rowtype}
-        }
-
-        {:reply, {:ok, 0}, state}
-
-      {:error, error} ->
-        {:reply, {:error, error}, state}
+    with {:ok, status, body} <- fetch_statement(state, statement, params, opts),
+         # Resolve async handles (queryId, no rowtype) to a result set, like execute/4.
+         {:ok, data} <- await_async_execution(state, status, body),
+         {:ok, partitions, state} <- prepare_stream(data, state) do
+      {:reply, {:ok, partitions}, state}
+    else
+      {:error, error} -> {:reply, {:error, error}, state}
     end
   end
 
@@ -457,6 +421,32 @@ defmodule Snowflex.Transport.Http do
   end
 
   ## Query helpers
+
+  # Stashes the query id and result metadata for later `fetch` calls, returning the
+  # number of partitions the caller should stream. Async handles are already resolved.
+  defp prepare_stream(data, state) do
+    state = %{state | current_partition: 0, current_statement: data["queryId"]}
+
+    case data do
+      # Chunked response
+      %{"rowtype" => rowtype, "chunks" => chunks} when is_list(chunks) ->
+        metadata = %{"rowType" => rowtype, "chunks" => chunks, "chunkHeaders" => data["chunkHeaders"]}
+        {:ok, length(chunks), %{state | result_metadata: metadata}}
+
+      # No chunks, single result set, buffer till requested
+      %{"rowtype" => rowtype, "rowset" => rowset} ->
+        {:ok, 1, %{state | result_metadata: %{"rowType" => rowtype, "rowset" => rowset}}}
+
+      # No results
+      %{"rowtype" => rowtype} ->
+        {:ok, 0, %{state | result_metadata: %{"rowType" => rowtype}}}
+
+      # Unknown shape: surface it as an error instead of crashing the GenServer.
+      other ->
+        err = %Error{message: "Unhandled Snowflake response shape: #{inspect(Map.keys(other))}"}
+        {:error, err}
+    end
+  end
 
   # v1 API async query response (code 333334 means async execution started)
   defp await_async_execution(state, 200, %{"queryId" => query_id} = body)
