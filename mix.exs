@@ -9,7 +9,7 @@ defmodule Snowflex.MixProject do
       app: :snowflex,
       name: "Snowflex",
       version: @version,
-      elixir: "~> 1.14",
+      elixir: "~> 1.15",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       package: package(),
@@ -75,7 +75,7 @@ defmodule Snowflex.MixProject do
       {:ecto_sql, "~> 3.12"},
       {:db_connection, "~> 2.4"},
       # HTTP
-      {:req, "~> 0.5 or ~> 0.6"},
+      {:req, "~> 0.7"},
       {:plug, "~> 1.0"},
       {:jose, "~> 1.11"},
       {:jason, "~> 1.0"},
@@ -84,7 +84,7 @@ defmodule Snowflex.MixProject do
       {:credo, "~> 1.7", only: :dev, runtime: false},
       {:ex_check, "~> 0.12", only: [:dev, :test], runtime: false},
       {:excoveralls, "~> 0.13", only: :test},
-      {:doctor, "~> 0.22.0", only: :dev},
+      {:doctor, "~> 0.23.0", only: :dev},
       {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false},
       # Documentation
       {:ex_doc, ">= 0.0.0", only: :dev, runtime: false},
